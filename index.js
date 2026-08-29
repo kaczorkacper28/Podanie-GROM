@@ -2,21 +2,10 @@ require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  Client,
-  GatewayIntentBits,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  PermissionFlagsBits,
-  MessageFlags,
-  Events
+  Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
+  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
+  PermissionFlagsBits, MessageFlags, Events
 } = require('discord.js');
 
 const {
@@ -28,7 +17,6 @@ const {
   REJECTED_ROLE_ID = ''
 } = process.env;
 
-// Twój Discord User ID — tylko Ty możesz rozpatrywać podania.
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID || '734656240201760869';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !REVIEW_CHANNEL_ID) {
@@ -42,18 +30,15 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '{}');
 
 function readData() {
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+  catch { return {}; }
 }
 
 function writeData(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// 44 pytań. Pytania 1-5 są formalne i mają 0 pkt. Pozostałe = dokładnie 100 pkt.
+// 44 pytań, dokładnie 100 punktów.
 const MAX = [
   0,0,0,0,0,2,3,5,3,3,2,2,3,3,2,4,3,3,3,4,2,3,3,2,3,3,4,3,3,2,3,2,3,2,1,1,1,1,1,3,2,2,2,3
 ];
@@ -108,6 +93,17 @@ const QUESTIONS = [
 const PER_MODAL = 5;
 const sessions = new Map();
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const discordRest = new REST({ version: '10' }).setToken(TOKEN);
+
+// Otwiera modal bez używania interaction.showModal().
+// Dzięki temu formularz działa również wtedy, gdy runtime ma niepełne API discord.js.
+async function openModal(interaction, modal) {
+  const data = typeof modal.toJSON === 'function' ? modal.toJSON() : modal;
+  await discordRest.post(
+    Routes.interactionCallback(interaction.id, interaction.token),
+    { body: { type: 9, data } }
+  );
+}
 
 function modalFor(userId, page) {
   const start = page * PER_MODAL;
@@ -123,42 +119,33 @@ function modalFor(userId, page) {
       .setStyle(i < 5 ? TextInputStyle.Short : TextInputStyle.Paragraph)
       .setRequired(true)
       .setMaxLength(4000);
-
     modal.addComponents(new ActionRowBuilder().addComponents(input));
   }
-
   return modal;
 }
 
 function scoreAnswer(answer, max) {
   if (!max) return 0;
-
   const text = String(answer || '').trim().toLowerCase();
   if (!text) return 0;
-
   const words = text.split(/\s+/).filter(Boolean).length;
   let points = 0;
-
   if (words >= 8) points++;
   if (words >= 20) points++;
   if (words >= 40) points++;
   if (words >= 70) points++;
 
   const keywords = [
-    'odpowiedzial', 'dyscyplin', 'zespół', 'współprac', 'komunik',
-    'opan', 'spokój', 'analiz', 'regulamin', 'rozkaz', 'przełoż',
-    'dowód', 'bezpieczeń', 'decyz', 'błąd', 'uczciw', 'procedur',
-    'lojal', 'presj', 'emocj', 'kontrol', 'pomoc', 'raport',
-    'konsekwenc', 'nauka'
+    'odpowiedzial','dyscyplin','zespół','współprac','komunik','opan',
+    'spokój','analiz','regulamin','rozkaz','przełoż','dowód','bezpieczeń',
+    'decyz','błąd','uczciw','procedur','lojal','presj','emocj','kontrol',
+    'pomoc','raport','konsekwenc','nauka'
   ];
-
   const hits = keywords.filter(k => text.includes(k)).length;
   if (hits >= 2) points++;
   if (hits >= 4) points++;
-
   if (max >= 4 && words >= 45 && hits >= 3) points = Math.max(points, max - 1);
   if (max >= 5 && words >= 70 && hits >= 4) points = max;
-
   return Math.min(points, max);
 }
 
@@ -176,7 +163,6 @@ function getStatus(score) {
 
 function summaryEmbed(app) {
   const [name, state, color] = getStatus(app.score);
-
   return new EmbedBuilder()
     .setColor(color)
     .setTitle('🇵🇱 GROM • PODANIE REKRUTACYJNE')
@@ -195,42 +181,26 @@ function summaryEmbed(app) {
 
 function detailEmbeds(app) {
   const embeds = [];
-
   for (let start = 0; start < QUESTIONS.length; start += 5) {
     const embed = new EmbedBuilder()
       .setColor(0x111827)
       .setTitle(`📋 GROM • Odpowiedzi ${start + 1}-${Math.min(start + 5, QUESTIONS.length)}`);
-
     for (let i = start; i < Math.min(start + 5, QUESTIONS.length); i++) {
       embed.addFields({
         name: `${i + 1}. ${QUESTIONS[i]} • ${scoreAnswer(app.answers[i], MAX[i])}/${MAX[i]} pkt`,
         value: String(app.answers[i] || 'Brak odpowiedzi').slice(0, 1024)
       });
     }
-
     embeds.push(embed);
   }
-
   return embeds;
 }
 
 function reviewRow(userId) {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`accept_${userId}`)
-      .setLabel('Przyjmij')
-      .setEmoji('✅')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`reject_${userId}`)
-      .setLabel('Odrzuć')
-      .setEmoji('❌')
-      .setStyle(ButtonStyle.Danger),
-    new ButtonBuilder()
-      .setCustomId(`details_${userId}`)
-      .setLabel('Pełne odpowiedzi')
-      .setEmoji('📋')
-      .setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(`accept_${userId}`).setLabel('Przyjmij').setEmoji('✅').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`reject_${userId}`).setLabel('Odrzuć').setEmoji('❌').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`details_${userId}`).setLabel('Pełne odpowiedzi').setEmoji('📋').setStyle(ButtonStyle.Secondary)
   );
 }
 
@@ -249,19 +219,19 @@ const commands = [
 
 client.once(Events.ClientReady, async () => {
   try {
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
-    await rest.put(
+    await discordRest.put(
       Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
       { body: commands }
     );
     console.log(`GROM BOT online: ${client.user.tag}`);
     console.log(`Właściciel systemu: ${ADMIN_USER_ID}`);
+    console.log('GROM: bezpośrednia obsługa modal callback aktywna.');
   } catch (error) {
     console.error('Błąd rejestracji komend:', error);
   }
 });
 
-client.on('interactionCreate', async interaction => {
+client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName === 'grom-id') {
@@ -284,24 +254,16 @@ client.on('interactionCreate', async interaction => {
             '🟣 **95–100** — wynik wybitny\n\n' +
             'Kliknij przycisk, aby rozpocząć.'
           );
-
         return interaction.reply({
           embeds: [embed],
-          components: [
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId('start_grom')
-                .setLabel('Rozpocznij podanie')
-                .setEmoji('🇵🇱')
-                .setStyle(ButtonStyle.Primary)
-            )
-          ]
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('start_grom').setLabel('Rozpocznij podanie').setEmoji('🇵🇱').setStyle(ButtonStyle.Primary)
+          )]
         });
       }
 
       if (interaction.commandName === 'grom-status') {
         const app = readData()[interaction.user.id];
-
         return interaction.reply({
           content: app ? undefined : 'Nie masz jeszcze podania.',
           embeds: app ? [summaryEmbed(app)] : [],
@@ -313,20 +275,18 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isButton()) {
       if (interaction.customId === 'start_grom') {
         const data = readData();
-
         if (data[interaction.user.id]?.completed) {
           return interaction.reply({
             content: 'Masz już złożone podanie. Użyj `/grom-status`.',
             flags: MessageFlags.Ephemeral
           });
         }
-
         sessions.set(interaction.user.id, []);
-        return interaction.showModal(modalFor(interaction.user.id, 0));
+        await openModal(interaction, modalFor(interaction.user.id, 0));
+        return;
       }
 
       if (/^(accept|reject|details)_\d+$/.test(interaction.customId)) {
-        // Tylko Twój Discord User ID może używać tych przycisków.
         if (interaction.user.id !== ADMIN_USER_ID) {
           return interaction.reply({
             content: '🔒 Tylko właściciel systemu może rozpatrywać podania.',
@@ -337,19 +297,12 @@ client.on('interactionCreate', async interaction => {
         const [action, userId] = interaction.customId.split('_');
         const data = readData();
         const app = data[userId];
-
         if (!app) {
-          return interaction.reply({
-            content: 'Nie znaleziono podania.',
-            flags: MessageFlags.Ephemeral
-          });
+          return interaction.reply({ content: 'Nie znaleziono podania.', flags: MessageFlags.Ephemeral });
         }
 
         if (action === 'details') {
-          return interaction.reply({
-            embeds: detailEmbeds(app),
-            flags: MessageFlags.Ephemeral
-          });
+          return interaction.reply({ embeds: detailEmbeds(app), flags: MessageFlags.Ephemeral });
         }
 
         app.finalStatus = action === 'accept' ? 'PRZYJĘTY' : 'ODRZUCONY';
@@ -358,20 +311,13 @@ client.on('interactionCreate', async interaction => {
         writeData(data);
 
         const member = await interaction.guild.members.fetch(userId).catch(() => null);
-
-        if (member && action === 'accept' && ACCEPTED_ROLE_ID) {
-          await member.roles.add(ACCEPTED_ROLE_ID).catch(() => {});
-        }
-
-        if (member && action === 'reject' && REJECTED_ROLE_ID) {
-          await member.roles.add(REJECTED_ROLE_ID).catch(() => {});
-        }
+        if (member && action === 'accept' && ACCEPTED_ROLE_ID) await member.roles.add(ACCEPTED_ROLE_ID).catch(() => {});
+        if (member && action === 'reject' && REJECTED_ROLE_ID) await member.roles.add(REJECTED_ROLE_ID).catch(() => {});
 
         const embed = summaryEmbed(app).addFields({
           name: 'Decyzja komisji',
           value: `${action === 'accept' ? '✅ PRZYJĘTY' : '❌ ODRZUCONY'}\nRekruter: <@${interaction.user.id}>`
         });
-
         return interaction.update({ embeds: [embed], components: [] });
       }
     }
@@ -381,24 +327,20 @@ client.on('interactionCreate', async interaction => {
       const page = Number(pageText);
 
       if (interaction.user.id !== userId) {
-        return interaction.reply({
-          content: 'To podanie nie należy do Ciebie.',
-          flags: MessageFlags.Ephemeral
-        });
+        return interaction.reply({ content: 'To podanie nie należy do Ciebie.', flags: MessageFlags.Ephemeral });
       }
 
       const answers = sessions.get(userId) || [];
       const start = page * PER_MODAL;
-
       for (let i = start; i < Math.min(start + PER_MODAL, QUESTIONS.length); i++) {
         answers[i] = interaction.fields.getTextInputValue(`q${i + 1}`);
       }
-
       sessions.set(userId, answers);
-      const next = page + 1;
 
+      const next = page + 1;
       if (next < Math.ceil(QUESTIONS.length / PER_MODAL)) {
-        return interaction.showModal(modalFor(userId, next));
+        await openModal(interaction, modalFor(userId, next));
+        return;
       }
 
       const app = {
@@ -417,12 +359,8 @@ client.on('interactionCreate', async interaction => {
       sessions.delete(userId);
 
       const channel = await client.channels.fetch(REVIEW_CHANNEL_ID).catch(() => null);
-
       if (channel?.isTextBased()) {
-        await channel.send({
-          embeds: [summaryEmbed(app)],
-          components: [reviewRow(userId)]
-        });
+        await channel.send({ embeds: [summaryEmbed(app)], components: [reviewRow(userId)] });
       }
 
       return interaction.reply({
@@ -432,7 +370,6 @@ client.on('interactionCreate', async interaction => {
     }
   } catch (error) {
     console.error('GROM interaction error:', error);
-
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction.reply({
         content: 'Wystąpił błąd. Sprawdź logi bota i spróbuj ponownie.',
