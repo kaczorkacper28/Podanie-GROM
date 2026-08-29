@@ -71,15 +71,18 @@ const QUESTIONS = [
 ];
 
 const PER_MODAL = 5;
+const TOTAL_PAGES = Math.ceil(QUESTIONS.length / PER_MODAL);
 const sessions = new Map();
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// Discord API wymaga, aby callback modala miał type=9, ale obiekt data NIE może
-// zawierać własnego pola type=9. Budujemy więc payload ręcznie.
+// Modal można otworzyć tylko jako odpowiedź na NOWĄ interakcję.
+// Dlatego po wysłaniu jednej części pokazujemy przycisk „Następna część”.
+// Dopiero kliknięcie tego przycisku otwiera kolejny modal.
 function modalPayload(userId, page) {
   const start = page * PER_MODAL;
   const components = [];
+
   for (let i = start; i < Math.min(start + PER_MODAL, QUESTIONS.length); i++) {
     components.push({
       type: 1,
@@ -90,13 +93,15 @@ function modalPayload(userId, page) {
         label: `Pytanie ${i + 1}`,
         placeholder: QUESTIONS[i].slice(0, 100),
         required: true,
+        min_length: 1,
         max_length: 4000
       }]
     });
   }
+
   return {
     custom_id: `grom_${userId}_${page}`,
-    title: `GROM • Część ${page + 1}/9`,
+    title: `GROM • Część ${page + 1}/${TOTAL_PAGES}`,
     components
   };
 }
@@ -105,6 +110,16 @@ async function openModal(interaction, page) {
   await rest.post(
     Routes.interactionCallback(interaction.id, interaction.token),
     { body: { type: 9, data: modalPayload(interaction.user.id, page) } }
+  );
+}
+
+function nextPartRow(userId, page) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`next_grom_${userId}_${page}`)
+      .setLabel(`Przejdź do części ${page + 1}`)
+      .setEmoji('➡️')
+      .setStyle(ButtonStyle.Primary)
   );
 }
 
@@ -126,7 +141,11 @@ function scoreAnswer(answer, max) {
   if (max >= 5 && words >= 70 && hits >= 4) points = max;
   return Math.min(points, max);
 }
-function totalScore(answers) { return answers.reduce((sum, answer, i) => sum + scoreAnswer(answer, MAX[i]), 0); }
+
+function totalScore(answers) {
+  return answers.reduce((sum, answer, i) => sum + scoreAnswer(answer, MAX[i]), 0);
+}
+
 function getStatus(score) {
   if (score >= 95) return ['🟣 Wynik wybitny','REKOMENDOWANY',0x9b59b6];
   if (score >= 85) return ['🟢 Zakwalifikowany do dalszego etapu','DALSZY ETAP',0x2ecc71];
@@ -134,22 +153,37 @@ function getStatus(score) {
   if (score >= 65) return ['🟠 Wymagana rozmowa dodatkowa','DODATKOWA WERYFIKACJA',0xe67e22];
   return ['❌ Odrzucone','ODRZUCONE',0xe74c3c];
 }
+
 function summaryEmbed(app) {
   const [name,state,color] = getStatus(app.score);
-  return new EmbedBuilder().setColor(color).setTitle('🇵🇱 GROM • PODANIE REKRUTACYJNE')
+  return new EmbedBuilder()
+    .setColor(color)
+    .setTitle('🇵🇱 GROM • PODANIE REKRUTACYJNE')
     .setDescription(`**Kandydat:** <@${app.userId}>\n**Nick:** ${app.nick}\n**Wynik:** **${app.score}/100 pkt**\n**Status:** ${state}`)
-    .addFields({name:'Ocena',value:name,inline:true},{name:'Data',value:`<t:${Math.floor(app.createdAt/1000)}:F>`,inline:true})
+    .addFields(
+      { name:'Ocena', value:name, inline:true },
+      { name:'Data', value:`<t:${Math.floor(app.createdAt/1000)}:F>`, inline:true }
+    )
     .setFooter({text:'GROM • System rekrutacyjny'});
 }
+
 function detailEmbeds(app) {
   const embeds=[];
   for(let start=0;start<QUESTIONS.length;start+=5){
-    const embed=new EmbedBuilder().setColor(0x111827).setTitle(`📋 GROM • Odpowiedzi ${start+1}-${Math.min(start+5,QUESTIONS.length)}`);
-    for(let i=start;i<Math.min(start+5,QUESTIONS.length);i++) embed.addFields({name:`${i+1}. ${QUESTIONS[i]} • ${scoreAnswer(app.answers[i],MAX[i])}/${MAX[i]} pkt`,value:String(app.answers[i]||'Brak odpowiedzi').slice(0,1024)});
+    const embed=new EmbedBuilder()
+      .setColor(0x111827)
+      .setTitle(`📋 GROM • Odpowiedzi ${start+1}-${Math.min(start+5,QUESTIONS.length)}`);
+    for(let i=start;i<Math.min(start+5,QUESTIONS.length);i++) {
+      embed.addFields({
+        name:`${i+1}. ${QUESTIONS[i]} • ${scoreAnswer(app.answers[i],MAX[i])}/${MAX[i]} pkt`,
+        value:String(app.answers[i]||'Brak odpowiedzi').slice(0,1024)
+      });
+    }
     embeds.push(embed);
   }
   return embeds;
 }
+
 function reviewRow(userId){
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`accept_${userId}`).setLabel('Przyjmij').setEmoji('✅').setStyle(ButtonStyle.Success),
@@ -169,30 +203,66 @@ client.once(Events.ClientReady, async()=>{
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID,GUILD_ID),{body:commands});
     console.log(`GROM BOT online: ${client.user.tag}`);
     console.log(`Właściciel systemu: ${ADMIN_USER_ID}`);
-    console.log('GROM: poprawna obsługa modal callback API aktywna.');
+    console.log('GROM: wieloetapowy formularz z checkpointem aktywny.');
   }catch(error){ console.error('Błąd rejestracji komend:',error); }
 });
 
 client.on(Events.InteractionCreate, async interaction=>{
   try{
     if(interaction.isChatInputCommand()){
-      if(interaction.commandName==='grom-id') return interaction.reply({content:`🆔 **Twój Discord User ID:**\n\`${interaction.user.id}\``,flags:MessageFlags.Ephemeral});
-      if(interaction.commandName==='podanie-grom'){
-        const embed=new EmbedBuilder().setColor(0x111827).setTitle('🇵🇱 GROM • REKRUTACJA ELITARNA').setDescription('Podanie zawiera **44 pytania** i maksymalnie **100 punktów**.\n\n🔴 **0–64** — odrzucone\n🟠 **65–74** — dodatkowa weryfikacja\n🟡 **75–84** — rozmowa\n🟢 **85–94** — dalszy etap\n🟣 **95–100** — wynik wybitny\n\nKliknij przycisk, aby rozpocząć.');
-        return interaction.reply({embeds:[embed],components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('start_grom').setLabel('Rozpocznij podanie').setEmoji('🇵🇱').setStyle(ButtonStyle.Primary))]});
+      if(interaction.commandName==='grom-id') {
+        return interaction.reply({content:`🆔 **Twój Discord User ID:**\n\`${interaction.user.id}\``,flags:MessageFlags.Ephemeral});
       }
+
+      if(interaction.commandName==='podanie-grom'){
+        const embed=new EmbedBuilder()
+          .setColor(0x111827)
+          .setTitle('🇵🇱 GROM • REKRUTACJA ELITARNA')
+          .setDescription('Podanie zawiera **44 pytania** i maksymalnie **100 punktów**.\n\n🔴 **0–64** — odrzucone\n🟠 **65–74** — dodatkowa weryfikacja\n🟡 **75–84** — rozmowa\n🟢 **85–94** — dalszy etap\n🟣 **95–100** — wynik wybitny\n\nKliknij przycisk, aby rozpocząć.');
+        return interaction.reply({
+          embeds:[embed],
+          components:[new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('start_grom').setLabel('Rozpocznij podanie').setEmoji('🇵🇱').setStyle(ButtonStyle.Primary)
+          )]
+        });
+      }
+
       if(interaction.commandName==='grom-status'){
         const app=readData()[interaction.user.id];
-        return interaction.reply({content:app?undefined:'Nie masz jeszcze podania.',embeds:app?[summaryEmbed(app)]:[],flags:MessageFlags.Ephemeral});
+        return interaction.reply({
+          content:app?undefined:'Nie masz jeszcze podania.',
+          embeds:app?[summaryEmbed(app)]:[],
+          flags:MessageFlags.Ephemeral
+        });
       }
     }
 
     if(interaction.isButton()){
       if(interaction.customId==='start_grom'){
         const data=readData();
-        if(data[interaction.user.id]?.completed) return interaction.reply({content:'Masz już złożone podanie. Użyj `/grom-status`.',flags:MessageFlags.Ephemeral});
+        if(data[interaction.user.id]?.completed) {
+          return interaction.reply({content:'Masz już złożone podanie. Użyj `/grom-status`.',flags:MessageFlags.Ephemeral});
+        }
         sessions.set(interaction.user.id,[]);
         await openModal(interaction,0);
+        return;
+      }
+
+      const nextMatch = interaction.customId.match(/^next_grom_(\d+)_(\d+)$/);
+      if(nextMatch){
+        const userId=nextMatch[1];
+        const page=Number(nextMatch[2]);
+        if(interaction.user.id!==userId) {
+          return interaction.reply({content:'🔒 To podanie należy do innej osoby.',flags:MessageFlags.Ephemeral});
+        }
+        const answers=sessions.get(userId);
+        if(!answers) {
+          return interaction.reply({content:'Sesja podania wygasła. Kliknij „Rozpocznij podanie” ponownie.',flags:MessageFlags.Ephemeral});
+        }
+        if(page<0 || page>=TOTAL_PAGES) {
+          return interaction.reply({content:'Nieprawidłowa część podania.',flags:MessageFlags.Ephemeral});
+        }
+        await openModal(interaction,page);
         return;
       }
 
@@ -202,7 +272,10 @@ client.on(Events.InteractionCreate, async interaction=>{
         const data=readData(); const app=data[userId];
         if(!app) return interaction.reply({content:'Nie znaleziono podania.',flags:MessageFlags.Ephemeral});
         if(action==='details') return interaction.reply({embeds:detailEmbeds(app),flags:MessageFlags.Ephemeral});
-        app.finalStatus=action==='accept'?'PRZYJĘTY':'ODRZUCONY'; app.reviewedBy=interaction.user.id; app.reviewedAt=Date.now(); writeData(data);
+        app.finalStatus=action==='accept'?'PRZYJĘTY':'ODRZUCONY';
+        app.reviewedBy=interaction.user.id;
+        app.reviewedAt=Date.now();
+        writeData(data);
         const member=await interaction.guild.members.fetch(userId).catch(()=>null);
         if(member&&action==='accept'&&ACCEPTED_ROLE_ID) await member.roles.add(ACCEPTED_ROLE_ID).catch(()=>{});
         if(member&&action==='reject'&&REJECTED_ROLE_ID) await member.roles.add(REJECTED_ROLE_ID).catch(()=>{});
@@ -215,22 +288,50 @@ client.on(Events.InteractionCreate, async interaction=>{
       const [,userId,pageText]=interaction.customId.split('_');
       const page=Number(pageText);
       if(interaction.user.id!==userId) return interaction.reply({content:'To podanie nie należy do Ciebie.',flags:MessageFlags.Ephemeral});
+
       const answers=sessions.get(userId)||[];
       const start=page*PER_MODAL;
-      for(let i=start;i<Math.min(start+PER_MODAL,QUESTIONS.length);i++) answers[i]=interaction.fields.getTextInputValue(`q${i+1}`);
+      for(let i=start;i<Math.min(start+PER_MODAL,QUESTIONS.length);i++) {
+        answers[i]=interaction.fields.getTextInputValue(`q${i+1}`);
+      }
       sessions.set(userId,answers);
+
       const next=page+1;
-      if(next<Math.ceil(QUESTIONS.length/PER_MODAL)){ await openModal(interaction,next); return; }
+      if(next<TOTAL_PAGES){
+        // WAŻNE: nie otwieramy kolejnego modala bezpośrednio z modal submit.
+        // Discord odrzuca type=9 w odpowiedzi na MODAL_SUBMIT.
+        return interaction.reply({
+          content:`✅ **Część ${page+1}/${TOTAL_PAGES} zapisana.**\nKliknij poniżej, aby przejść dalej.`,
+          components:[nextPartRow(userId,next)],
+          flags:MessageFlags.Ephemeral
+        });
+      }
+
       const app={userId,nick:interaction.user.username,answers,score:totalScore(answers),completed:true,createdAt:Date.now()};
-      const data=readData(); data[userId]=app; writeData(data); sessions.delete(userId);
+      const data=readData();
+      data[userId]=app;
+      writeData(data);
+      sessions.delete(userId);
+
       const reviewChannel=await client.channels.fetch(REVIEW_CHANNEL_ID).catch(()=>null);
-      if(reviewChannel&&reviewChannel.isTextBased()) await reviewChannel.send({embeds:[summaryEmbed(app)],components:[reviewRow(userId)]});
-      return interaction.reply({content:`✅ Podanie zostało wysłane. Twój wynik: **${app.score}/100 pkt**. Użyj \/grom-status, aby sprawdzić status.`,flags:MessageFlags.Ephemeral});
+      if(reviewChannel&&reviewChannel.isTextBased()) {
+        await reviewChannel.send({embeds:[summaryEmbed(app)],components:[reviewRow(userId)]});
+      }
+
+      return interaction.reply({
+        content:`✅ Podanie zostało wysłane. Twój wynik: **${app.score}/100 pkt**. Użyj \/grom-status, aby sprawdzić status.`,
+        flags:MessageFlags.Ephemeral
+      });
     }
   }catch(error){
     console.error('GROM interaction error:',error);
-    if(!interaction.replied&&!interaction.deferred) await interaction.reply({content:'❌ Wystąpił błąd. Spróbuj ponownie.',flags:MessageFlags.Ephemeral}).catch(()=>{});
+    if(!interaction.replied&&!interaction.deferred) {
+      await interaction.reply({content:'❌ Wystąpił błąd. Spróbuj ponownie.',flags:MessageFlags.Ephemeral}).catch(()=>{});
+    }
   }
 });
 
-client.login(TOKEN).catch(error=>{ console.error('Błąd logowania bota:',error); process.exit(1); });
+client.login(TOKEN).catch(error=>{
+  console.error('Błąd logowania bota:',error);
+  process.exit(1);
+});
