@@ -4,7 +4,7 @@
   "description": "Discord bot do wymagających podań rekrutacyjnych GROM z automatyczną punktacją.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node -r ./channel.js index.js"
   },
   "engines": {
     "node": ">=20"
