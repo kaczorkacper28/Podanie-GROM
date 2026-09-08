@@ -154,17 +154,79 @@ function getStatus(score) {
   return ['❌ Odrzucone','ODRZUCONE',0xe74c3c];
 }
 
+function getFinalStatus(app) {
+  if (app?.finalStatus === 'PRZYJĘTY') {
+    return ['✅ Przyjęty', 'PRZYJĘTY', 0x2ecc71];
+  }
+
+  if (app?.finalStatus === 'ODRZUCONY') {
+    return ['❌ Odrzucone', 'ODRZUCONY', 0xe74c3c];
+  }
+
+  return getStatus(Number(app?.score) || 0);
+}
+
 function summaryEmbed(app) {
-  const [name,state,color] = getStatus(app.score);
-  return new EmbedBuilder()
+  const [name, state, color] = getFinalStatus(app);
+
+  const embed = new EmbedBuilder()
     .setColor(color)
     .setTitle('🇵🇱 GROM • PODANIE REKRUTACYJNE')
-    .setDescription(`**Kandydat:** <@${app.userId}>\n**Nick:** ${app.nick}\n**Wynik:** **${app.score}/100 pkt**\n**Status:** ${state}`)
+    .setDescription(`**Kandydat:** <@${app.userId}>\n**Nick:** ${app.nick || 'Nieznany'}\n**Wynik:** **${Number(app.score) || 0}/100 pkt**\n**Status:** ${state}`)
     .addFields(
       { name:'Ocena', value:name, inline:true },
-      { name:'Data', value:`<t:${Math.floor(app.createdAt/1000)}:F>`, inline:true }
-    )
-    .setFooter({text:'GROM • System rekrutacyjny'});
+      { name:'Data', value:`<t:${Math.floor((app.createdAt || Date.now())/1000)}:F>`, inline:true }
+    );
+
+  if (app.finalStatus && app.reviewedBy) {
+    embed.addFields({
+      name: 'Decyzja komisji',
+      value: `${app.finalStatus === 'PRZYJĘTY' ? '✅ PRZYJĘTY' : '❌ ODRZUCONY'}\nRekruter: <@${app.reviewedBy}>`
+    });
+  }
+
+  return embed.setFooter({text:'GROM • System rekrutacyjny'});
+}
+
+// Jeżeli bot został zrestartowany, lokalny applications.json może być pusty.
+// W takim przypadku odczytujemy podstawowe dane bezpośrednio z wiadomości
+// rekrutacyjnej w kanale REVIEW_CHANNEL_ID. Dzięki temu przyciski nadal działają.
+async function findApplicationInReviewChannel(userId) {
+  const channel = await client.channels.fetch(REVIEW_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased() || !channel.messages) return null;
+
+  const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+  if (!messages) return null;
+
+  for (const message of messages.values()) {
+    const embed = message.embeds?.[0];
+    const description = embed?.description || '';
+
+    if (!description.includes(`<@${userId}>`)) continue;
+
+    const scoreMatch = description.match(/\*\*(\d+)\/100 pkt\*\*/);
+    const nickMatch = description.match(/\*\*Nick:\*\* ([^\n]+)/);
+    const dateMatch = description.match(/<t:(\d+):F>/);
+
+    let finalStatus = null;
+    const decisionField = embed.fields?.find(field => field.name === 'Decyzja komisji');
+
+    if (decisionField) {
+      if (decisionField.value.includes('PRZYJĘTY')) finalStatus = 'PRZYJĘTY';
+      if (decisionField.value.includes('ODRZUCONY')) finalStatus = 'ODRZUCONY';
+    }
+
+    return {
+      userId,
+      nick: nickMatch?.[1] || 'Nieznany',
+      score: Number(scoreMatch?.[1] || 0),
+      createdAt: dateMatch ? Number(dateMatch[1]) * 1000 : message.createdTimestamp,
+      finalStatus,
+      reviewMessageId: message.id
+    };
+  }
+
+  return null;
 }
 
 function detailEmbeds(app) {
@@ -228,7 +290,18 @@ client.on(Events.InteractionCreate, async interaction=>{
       }
 
       if(interaction.commandName==='grom-status'){
-        const app=readData()[interaction.user.id];
+        const data = readData();
+        let app = data[interaction.user.id];
+
+        if (!app) {
+          app = await findApplicationInReviewChannel(interaction.user.id);
+
+          if (app) {
+            data[interaction.user.id] = app;
+            writeData(data);
+          }
+        }
+
         return interaction.reply({
           content:app?undefined:'Nie masz jeszcze podania.',
           embeds:app?[summaryEmbed(app)]:[],
@@ -267,20 +340,90 @@ client.on(Events.InteractionCreate, async interaction=>{
       }
 
       if(/^(accept|reject|details)_\d+$/.test(interaction.customId)){
-        if(interaction.user.id!==ADMIN_USER_ID) return interaction.reply({content:'🔒 Tylko właściciel systemu może rozpatrywać podania.',flags:MessageFlags.Ephemeral});
-        const [action,userId]=interaction.customId.split('_');
-        const data=readData(); const app=data[userId];
-        if(!app) return interaction.reply({content:'Nie znaleziono podania.',flags:MessageFlags.Ephemeral});
-        if(action==='details') return interaction.reply({embeds:detailEmbeds(app),flags:MessageFlags.Ephemeral});
-        app.finalStatus=action==='accept'?'PRZYJĘTY':'ODRZUCONY';
-        app.reviewedBy=interaction.user.id;
-        app.reviewedAt=Date.now();
+        if(interaction.user.id!==ADMIN_USER_ID) {
+          return interaction.reply({
+            content:'🔒 Tylko właściciel systemu może rozpatrywać podania.',
+            flags:MessageFlags.Ephemeral
+          });
+        }
+
+        const [action,userId] = interaction.customId.split('_');
+        const data = readData();
+
+        // Najpierw szukamy w applications.json.
+        // Jeżeli plik został utracony po restarcie/wdrożeniu, szukamy
+        // podstawowych danych w wiadomości rekrutacyjnej Discorda.
+        let app = data[userId];
+
+        if (!app) {
+          app = await findApplicationInReviewChannel(userId);
+
+          if (app) {
+            // Przywracamy rekord do lokalnego pliku, aby kolejne kliknięcia
+            // i /grom-status mogły korzystać z tego samego rekordu.
+            data[userId] = app;
+            writeData(data);
+          }
+        }
+
+        if(!app) {
+          return interaction.reply({
+            content:'❌ Nie znaleziono podania w bazie ani w kanale rekrutacyjnym.',
+            flags:MessageFlags.Ephemeral
+          });
+        }
+
+        if(action==='details') {
+          if (!Array.isArray(app.answers) || app.answers.length === 0) {
+            return interaction.reply({
+              content:'⚠️ Dane odpowiedzi nie są już dostępne w applications.json. Podstawowe dane podania zostały odzyskane z wiadomości rekrutacyjnej.',
+              flags:MessageFlags.Ephemeral
+            });
+          }
+
+          return interaction.reply({
+            embeds:detailEmbeds(app),
+            flags:MessageFlags.Ephemeral
+          });
+        }
+
+        // Nie pozwalamy ponownie zmienić rozpatrzonego podania.
+        if (app.finalStatus) {
+          return interaction.reply({
+            content:`⚠️ To podanie zostało już rozpatrzone jako **${app.finalStatus}**.`,
+            flags:MessageFlags.Ephemeral
+          });
+        }
+
+        app.finalStatus = action === 'accept' ? 'PRZYJĘTY' : 'ODRZUCONY';
+        app.reviewedBy = interaction.user.id;
+        app.reviewedAt = Date.now();
+
+        data[userId] = app;
         writeData(data);
-        const member=await interaction.guild.members.fetch(userId).catch(()=>null);
-        if(member&&action==='accept'&&ACCEPTED_ROLE_ID) await member.roles.add(ACCEPTED_ROLE_ID).catch(()=>{});
-        if(member&&action==='reject'&&REJECTED_ROLE_ID) await member.roles.add(REJECTED_ROLE_ID).catch(()=>{});
-        const embed=summaryEmbed(app).addFields({name:'Decyzja komisji',value:`${action==='accept'?'✅ PRZYJĘTY':'❌ ODRZUCONY'}\nRekruter: <@${interaction.user.id}>`});
-        return interaction.update({embeds:[embed],components:[]});
+
+        const member = await interaction.guild.members.fetch(userId).catch(() => null);
+
+        if(member && action === 'accept' && ACCEPTED_ROLE_ID) {
+          await member.roles.add(ACCEPTED_ROLE_ID).catch(error => {
+            console.error('Nie udało się nadać roli przyjętego:', error);
+          });
+        }
+
+        if(member && action === 'reject' && REJECTED_ROLE_ID) {
+          await member.roles.add(REJECTED_ROLE_ID).catch(error => {
+            console.error('Nie udało się nadać roli odrzuconego:', error);
+          });
+        }
+
+        // summaryEmbed() sam pokazuje PRZYJĘTY/ODRZUCONY,
+        // zamiast ponownie wyliczać status z punktów.
+        const embed = summaryEmbed(app);
+
+        return interaction.update({
+          embeds:[embed],
+          components:[]
+        });
       }
     }
 
@@ -319,7 +462,7 @@ client.on(Events.InteractionCreate, async interaction=>{
       }
 
       return interaction.reply({
-        content:`✅ Podanie zostało wysłane. Twój wynik: **${app.score}/100 pkt**. Użyj \/grom-status, aby sprawdzić status.`,
+        content:`✅ Podanie zostało wysłane. Twój wynik: **${app.score}/100 pkt**. Użyj /grom-status, aby sprawdzić status.`,
         flags:MessageFlags.Ephemeral
       });
     }
